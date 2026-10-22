@@ -960,3 +960,49 @@ fn leader_completeness_judges_an_entry_by_the_term_it_committed_in() {
         ..
     });
 }
+
+#[test]
+fn committed_on_quorum_checks_earlier_term_entries_a_leader_commits() {
+    let mut checker = InvariantChecker::default();
+    let leader = |committed: LogId| {
+        SnapshotBuilder::new(1)
+            .term(2)
+            .leader(2, 1, true)
+            .state(openraft::ServerState::Leader)
+            .log_entries([log_id(1, 1, 1), log_id(1, 1, 2), log_id(1, 1, 3)])
+            .committed(committed)
+            .membership_voters(vec![vec![1, 2, 3]])
+            .build()
+    };
+    let follower = |id: NodeId, entries: Vec<LogId>| SnapshotBuilder::new(id).log_entries(entries).build();
+
+    // Elected for term 2 holding the tail 2..=3 of term 1, committed up to 1.
+    let tick1 = vec![
+        leader(log_id(1, 1, 1)),
+        follower(2, vec![log_id(1, 1, 1)]),
+        follower(3, vec![log_id(1, 1, 1)]),
+    ];
+    assert_no_violations!(checker.check(&tick1).violations);
+
+    // It commits that tail, which no follower holds: it counted its own
+    // unflushed tail as matched (openraft #2118).
+    let tick2 = vec![
+        leader(log_id(1, 1, 3)),
+        follower(2, vec![log_id(1, 1, 1)]),
+        follower(3, vec![log_id(1, 1, 1)]),
+    ];
+    let r = checker.check(&tick2);
+    assert_variant!(r.violations, InvariantViolation::CommittedNotOnQuorum {
+        leader: 1,
+        index: 3,
+        ..
+    });
+
+    // With a follower holding it, the commit is sound.
+    let tick3 = vec![
+        leader(log_id(1, 1, 3)),
+        follower(2, vec![log_id(1, 1, 1), log_id(1, 1, 2), log_id(1, 1, 3)]),
+        follower(3, vec![log_id(1, 1, 1)]),
+    ];
+    assert_no_violations!(checker.check(&tick3).violations);
+}

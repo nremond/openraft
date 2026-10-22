@@ -98,6 +98,7 @@ pub struct InvariantCheckResult {
 pub struct InvariantChecker {
     witnesses: committed_immutable::Witness,
     commits: leader_completeness::CommitHistory,
+    leader_commits: committed_on_quorum::LeaderCommits,
     monotonic: monotonic::MonotonicHistory,
     sm_monotonic: sm_monotonic::SmMonotonicHistory,
     log_ids: log_id_unique::LogIdWitness,
@@ -125,7 +126,7 @@ impl InvariantChecker {
 
         // --- Single-tick cross-node checks ---
         election_safety::check(snapshots, &mut violations);
-        committed_on_quorum::check(snapshots, durable_logs, &mut violations);
+        self.leader_commits.check_and_record(snapshots, durable_logs, &mut violations);
 
         // --- Pairwise cross-node checks ---
         for i in 0..snapshots.len() {

@@ -207,9 +207,10 @@ impl LogStore {
         }
     }
 
-    /// The log ids a reader sees.
+    /// The log ids on disk: what this node would restart with after a power
+    /// loss.
     pub fn log_id_list(&self) -> LogIdListOf<TypeConfig> {
-        self.inner.lock().unwrap().live.log_id_list()
+        self.inner.lock().unwrap().durable.log_id_list()
     }
 
     /// Take the entries appended since the last call.
@@ -619,8 +620,9 @@ mod tests {
         let (tx, mut rx) = TypeConfig::oneshot();
         store.append([blank(1), blank(2)], IOFlushed::signal(tx)).await.unwrap();
 
-        // Readable at once, not reported flushed.
+        // Readable at once, not on disk, not reported flushed.
         assert_eq!(last_index(&mut store).await, Some(2));
+        assert_eq!(store.log_id_list().get(2), None);
         assert!(rx.try_recv().is_err());
 
         store.crash(true);
@@ -634,6 +636,7 @@ mod tests {
 
         store.crash(false);
         assert_eq!(last_index(&mut store).await, Some(2));
+        assert_eq!(store.log_id_list().get(2), Some(log_id(2)));
     }
 
     #[tokio::test]
