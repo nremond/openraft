@@ -1056,7 +1056,7 @@ fn maybe_finalize_joint(
     if inflight.as_ref().is_some_and(|d| !d.load(Ordering::SeqCst)) {
         return;
     }
-    let Some((leader_id, raft)) = cluster_state.lock().unwrap().find_leader_entry() else {
+    let Some((leader_id, raft)) = surviving_leader(cluster_state) else {
         return;
     };
     let snapshots = cluster_state.lock().unwrap().get_all_full_snapshots();
@@ -1430,6 +1430,14 @@ fn poll_membership(
     }
 }
 
+/// A leader of the surviving cluster, see [`liveness::surviving_leaders`]:
+/// not a removed node that still reports itself `Leader`.
+fn surviving_leader(cluster_state: &Arc<Mutex<ClusterState>>) -> Option<(NodeId, Arc<Raft>)> {
+    let state = cluster_state.lock().unwrap();
+    let leader = *liveness::surviving_leaders(&state.get_all_full_snapshots()).first()?;
+    state.get_raft(leader).map(|raft| (leader, raft))
+}
+
 /// Step the sim until [`liveness::check_converged`] passes or `deadline_in`
 /// ticks elapse. On timeout, records a violation (tagged with `label`) and
 /// dumps per-node state.
@@ -1545,7 +1553,7 @@ fn run_liveness_phase(
         }
         if st.steps >= next_op {
             next_op = st.steps + 250;
-            if !writes_done && let Some(raft) = cluster_state.lock().unwrap().find_leader() {
+            if !writes_done && let Some((_, raft)) = surviving_leader(cluster_state) {
                 let req = workload.schedule.build_request();
                 enqueue_write(&workload.driver_queue, &workload.history, raft, req);
             }

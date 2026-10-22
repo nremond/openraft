@@ -10,7 +10,7 @@ The core of this suite is a tick-based fuzzer in `src/bin/fuzz.rs`. Each iterati
 
 1. **Safety phase**: a client workload (tracked writes, linearizable reads), membership churn, trigger ops, and network/process chaos all run concurrently. After every tick the fuzzer snapshots every node and checks all invariants plus the client oracle.
 2. **Liveness phase**: all faults are removed and the cluster must *completely heal*:
-   - **Converge**: one leader, uniform (non-joint) membership, every member with identical log, applied index, and state machine. A joint config left behind by an interrupted `change_membership` is finalized by the harness, acting as the operator.
+   - **Converge**: one leader, uniform (non-joint) membership, every member with identical log, applied index, and state machine. A joint config left behind by an interrupted `change_membership` is finalized by the harness, acting as the operator. Leaders are counted in the surviving cluster, the newest membership any node holds: a node removed before it heard of a newer leader may keep reporting itself `Leader`, as openraft allows ([#2178](https://github.com/databendlabs/openraft/issues/2178)), and is ignored.
    - **Serve**: the healed cluster must ack fresh writes and serve linearizable reads.
    - **Re-converge and durability scan**: after the service check, every member's settled state machine must hold every acked write (or a later write to the same key).
 
