@@ -37,6 +37,7 @@ pub enum InvariantViolation {
         leader: NodeId,
         leader_id: CLeaderId,
         missing_index: u64,
+        /// The entry was committed by this leader or an earlier one.
         committed_by: CLeaderId,
     },
 
@@ -146,7 +147,7 @@ impl std::fmt::Display for InvariantViolation {
             } => write!(
                 f,
                 "LeaderCompleteness: leader n{leader}@{leader_id} is missing \
-                 committed index {missing_index} (committed by {committed_by})"
+                 committed index {missing_index} (committed by {committed_by} or earlier)"
             ),
             Self::StateMachineDivergence { index, nodes } => {
                 write!(

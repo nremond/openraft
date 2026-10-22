@@ -904,3 +904,59 @@ fn final_log_id_check_flags_two_entries_under_one_log_id() {
         ..
     });
 }
+
+#[test]
+fn leader_completeness_judges_an_entry_by_the_term_it_committed_in() {
+    let mut checker = InvariantChecker::default();
+
+    // Leader (2,1) wrote index 2 but committed only index 1. Node 2 led term
+    // 3 without index 2, which was legal: it was not committed yet.
+    let tick1 = vec![
+        SnapshotBuilder::new(1)
+            .term(2)
+            .leader(2, 1, true)
+            .log_entries([log_id(2, 1, 1), log_id(2, 1, 2)])
+            .committed(log_id(2, 1, 1))
+            .build(),
+    ];
+    assert_no_violations!(checker.check(&tick1).violations);
+
+    // Node 1 is elected for term 4 and commits index 2 along with its own
+    // entry. Node 2, back from a crash, still holds its vote of term 3.
+    let tick2 = vec![
+        SnapshotBuilder::new(1)
+            .term(4)
+            .leader(4, 1, true)
+            .log_entries([log_id(2, 1, 1), log_id(2, 1, 2), log_id(4, 1, 3)])
+            .committed(log_id(4, 1, 3))
+            .build(),
+        SnapshotBuilder::new(2)
+            .term(3)
+            .leader(3, 2, true)
+            .log_entries([log_id(2, 1, 1)])
+            .committed(log_id(2, 1, 1))
+            .build(),
+    ];
+    let r = checker.check(&tick2);
+    assert!(
+        !r.violations.iter().any(|v| matches!(v, InvariantViolation::LeaderMissingCommitted { .. })),
+        "index 2 committed in term 4 is not required of term 3's leader: {:?}",
+        r.violations
+    );
+
+    // A leader of term 5 must hold it.
+    let tick3 = vec![
+        SnapshotBuilder::new(2)
+            .term(5)
+            .leader(5, 2, true)
+            .log_entries([log_id(2, 1, 1)])
+            .committed(log_id(2, 1, 1))
+            .build(),
+    ];
+    let r = checker.check(&tick3);
+    assert_variant!(r.violations, InvariantViolation::LeaderMissingCommitted {
+        leader: 2,
+        missing_index: 2,
+        ..
+    });
+}
