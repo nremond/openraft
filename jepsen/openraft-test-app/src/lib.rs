@@ -53,6 +53,10 @@ pub struct Opt {
     #[clap(long)]
     snapshot_threshold: Option<NonZeroU64>,
 
+    /// Logs to keep behind the latest snapshot; 0 purges every log the snapshot covers.
+    #[clap(long)]
+    max_in_snapshot_log_to_keep: Option<u64>,
+
     #[clap(long)]
     enable_pre_vote: bool,
 
@@ -70,6 +74,7 @@ pub async fn start_raft_node(options: Opt) -> std::io::Result<()> {
         raft_addr,
         data_dir,
         snapshot_threshold,
+        max_in_snapshot_log_to_keep,
         enable_pre_vote,
         disable_leader_restore,
     } = options;
@@ -90,6 +95,10 @@ pub async fn start_raft_node(options: Opt) -> std::io::Result<()> {
 
     if let Some(threshold) = snapshot_threshold {
         config.snapshot_policy = SnapshotPolicy::LogsSinceLast(threshold.get());
+    }
+
+    if let Some(keep) = max_in_snapshot_log_to_keep {
+        config.max_in_snapshot_log_to_keep = keep;
     }
 
     let config = Arc::new(config.validate().unwrap());
