@@ -140,6 +140,75 @@ Because iterations are fully deterministic and per-iteration RNG state is reset,
 
 The harness was validated by re-introducing a fixed bug and confirming detection: reverting the fix for [#1802](https://github.com/databendlabs/openraft/issues/1802) (`VecProgress` losing its sorted-prefix invariant, committing without a real quorum) is caught within ~50 iterations by `CommittedNotOnQuorum`, reproduces exactly, and disappears when the fix is restored. See `ISSUES.md` for bug classes not yet covered.
 
+### Storage faults: what they find
+
+Measured on 2026-10-22 against `main` at fcc11e08: seeds 1–2,000 at `--max-steps 10000` and seeds 1–400 at `--max-steps 100000`, in each storage mode. A run stops at its first failure, so the table counts the first bug each failing seed hits. Each was attributed by rerunning the seed with the two purge fixes of [#2177](https://github.com/databendlabs/openraft/pull/2177).
+
+| Bug | durable, 10k | seeded, 10k | lossy, 10k | durable, 100k | seeded, 100k | lossy, 100k | Caught by |
+|-----|--------------|-------------|------------|---------------|--------------|-------------|-----------|
+| Purge point moves back (#2177) | 1 / 2,000 | 1 / 2,000 | 2 / 2,000 | 22 / 400 | 21 / 400 | 22 / 400 | `LogHandler::update_purge_upto` debug assertion |
+| Startup purges past the snapshot (#2177) | — | — | — | — | 2 / 400 | 3 / 400 | `RaftState` validation in `Engine::startup` |
+| [#2167](https://github.com/databendlabs/openraft/issues/2167) restored leader reissues a log id | — | — | — | — | — | — | out of reach while the store keeps [#2172](https://github.com/databendlabs/openraft/pull/2172)'s requirement, see below |
+| [#2118](https://github.com/databendlabs/openraft/issues/2118) unflushed log IO marked flushed | — | — | — | — | — | — | not found, see below |
+| [#2116](https://github.com/databendlabs/openraft/issues/2116) apply after a snapshot purge | — | — | — | — | — | — | not found |
+
+With both purge fixes applied, all 7,200 seeds pass. At 100k the purge assertion stops about one seed in 20, in every mode, before anything else can show.
+
+- **The purge point moves back** whenever `trigger().purge_log(i)` on a leader is deferred because replication still reads log `i`, and a snapshot then completes: its policy purge, `max_in_snapshot_log_to_keep` entries short of it, lands below `i`. Debug builds panic; release builds move the purge point back. It needs no storage fault.
+- **Startup purges past the snapshot** after a node applied entries its own log had not flushed (a leader commits on its followers' flushes) and then lost them in a power loss. At restart `get_initial_state` finds `last_log_id < last_applied` and purges up to `last_applied`, beyond the last snapshot. A store pair like `log-rocks` with `sm-rocks` can reach it.
+- **#2167** needs a restored leader that lost, in a crash, entries it had already replicated. A seed with leader restore makes appends durable before they are readable, as #2172 requires, so the leader cannot have sent what it loses; a seed without it never restores a leader. On the same seeds, a model that let appends be read before they were flushed under leader restore hit #2167 first in 9 short seeded and 31 short lossy seeds, and in 5 and 23 long ones, caught by Log Id Uniqueness. [#2170](https://github.com/databendlabs/openraft/issues/2170), a snapshot ending inside a follower's log that #2167 can lead to, was the first failure of no seed.
+- **#2118** is not reachable with a store that keeps the contract: `save_vote` returns only once every write before it is durable, so a new leader's tail is flushed before its `UpdateIOProgress` runs. On `main` at dee1d078, 2,000 lossy seeds found nothing with the #2118 fix reverted, with a `save_vote` that overtakes pending appends (breaking the contract), or with both. The window needs a new leader that still has appends in flight and commits them before its own flush finishes, a round trip faster than that flush. Committed On Quorum checks such commits.
+- **#2116**: about half the seeds apply in batches delayed by up to 5–100 ms, with snapshots every 100–250 entries and purges up to the snapshot.
+
+### Depth and cost
+
+One seed takes about 1.4 s at `--max-steps 10000` and 20–22 s at `--max-steps 100000` (release build, 30 processes at once on a 32-core x86 Linux machine), with no consistent difference between storage modes. Long runs find the purge bugs: the purge assertion fails one long seed in 20 but one short seed in 1,500, and the startup purge failed 5 of 800 long runs with storage faults and none of 4,000 short ones.
+
+### A nightly job
+
+CI runs 5 short seeds per pull request on durable storage (see [Storage faults](#storage-faults)). Once #2177 lands, CI can drop `--storage durable`, and a nightly job can add depth. A proposal: four runners for about an hour, two at `--max-steps 10000` and two at `--max-steps 100000`, one of each with `--storage lossy`, about 5,000 short and 400 long seeds a night, new ones every night through a base seed taken from the date, and a crash file to replay:
+
+```yaml
+# Proposal, not yet a workflow: .github/workflows/detsim-nightly.yml
+#
+# name: detsim-nightly
+# on:
+#   schedule:
+#     - cron: "0 2 * * *"
+#   workflow_dispatch:
+# jobs:
+#   fuzz:
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 120
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         include:
+#           - { storage: seeded, steps: 10000, iterations: 2500 }
+#           - { storage: lossy, steps: 10000, iterations: 2500 }
+#           - { storage: seeded, steps: 100000, iterations: 200 }
+#           - { storage: lossy, steps: 100000, iterations: 200 }
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions-rust-lang/setup-rust-toolchain@v1
+#         with:
+#           cache-workspaces: tests-turmoil
+#           rustflags: ""
+#       - name: Fuzz
+#         run: >
+#           cd tests-turmoil && cargo run --release --bin fuzz --
+#           --seed "$(date +%Y%m%d)00000" --iterations ${{ matrix.iterations }}
+#           --max-steps ${{ matrix.steps }} --storage ${{ matrix.storage }}
+#           --crash-file crash.json
+#       - if: failure()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: crash-${{ matrix.storage }}-${{ matrix.steps }}
+#           path: tests-turmoil/crash.json
+```
+
+`--iterations` stops at the first failing seed, so a red night shows one failure per runner; `--reproduce` with the logged seed replays it.
+
 ## Running the Fuzzer
 
 ```bash
