@@ -107,6 +107,16 @@ pub enum InvariantViolation {
         previous: crate::typ::LogId,
         current: Option<crate::typ::LogId>,
     },
+
+    /// Log Id Uniqueness (derived from Log Matching, Paper §3.5):
+    /// two nodes hold different entries under the same log id.
+    LogIdReused {
+        log_id: crate::typ::LogId,
+        /// A node holding the entry first seen under `log_id`.
+        holder: NodeId,
+        /// The node holding a different entry under it.
+        appender: NodeId,
+    },
 }
 
 impl std::fmt::Display for InvariantViolation {
@@ -214,6 +224,14 @@ impl std::fmt::Display for InvariantViolation {
                     "MonotonicSmKeys: n{node} key={key} written at {previous} -> {current:?}"
                 )
             }
+            Self::LogIdReused {
+                log_id,
+                holder,
+                appender,
+            } => write!(
+                f,
+                "LogIdUnique: n{holder} and n{appender} hold different entries under log id {log_id}"
+            ),
         }
     }
 }

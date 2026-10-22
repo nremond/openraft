@@ -74,12 +74,15 @@ The checker lives in `src/invariants/`, with one file per property. Each propert
 | Monotonic Applied Index | derived  | —                               | A node's `last_applied.index` never decreases, restarts included                     |
 | Monotonic Vote          | §3.3     | `MonotonicVote`                 | A node's flushed vote (ordered by `(term, leader_id, committed)`) never regresses, restarts included |
 | Monotonic SM Keys       | derived  | —                               | Per node and key, the writing log id never decreases and keys never vanish          |
+| Log Id Uniqueness       | §3.5     | (implied by `NoLogDivergence`)  | No two nodes hold different entries under one log id: on every append, and over every log after the run |
 
 All identity comparisons use `CommittedLeaderId` (not just `term`), so the same checks are correct under both openraft modes:
 - `leader_id_std`: `CommittedLeaderId == term`, so Election Safety reduces to "one leader per term".
 - `leader_id_adv` (the default, used here): `CommittedLeaderId == (term, node_id)`, so two nodes legitimately leading with different `node_id`s in the same term are not flagged.
 
 A restart reloads term and committed from disk, which may hold less than the process had: a power loss drops a vote whose `save_vote` had not returned, and an unflushed `save_committed`. So those two are checked within one process; the flushed vote, which storage made durable before openraft reported it, and the applied state, durable when `apply` returns, are checked across restarts too.
+
+Log Id Uniqueness compares payloads, which Log Matching cannot: it compares log ids only, and one log id naming two entries is exactly what openraft [#2167](https://github.com/databendlabs/openraft/issues/2167) produces when a store under leader restore makes entries readable before they are durable, which [#2172](https://github.com/databendlabs/openraft/pull/2172) forbids. An entry that no node holds any more, such as one lost with the power before it left the leader, may be reissued.
 
 The checker is **stateful**: `InvariantChecker` retains per-index committed history (for Committed Immutable) and per-node last-seen state (for the Monotonic family) across ticks, so cross-time invariants can be caught. `Leader Append-Only` (paper §3.6.3) is not checked directly; its safety content for committed entries is already covered by Log Matching + Committed Immutable + Leader Completeness.
 

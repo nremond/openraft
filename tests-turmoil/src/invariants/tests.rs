@@ -840,3 +840,67 @@ fn vote_and_applied_checked_across_restart() {
         ..
     });
 }
+
+fn appended(node: NodeId, lid: LogId, payload: &str) -> crate::store::AppendedEntry {
+    crate::store::AppendedEntry {
+        node,
+        log_id: lid,
+        payload: payload.as_bytes().to_vec(),
+    }
+}
+
+#[test]
+fn log_id_reuse_detected_while_first_entry_is_held() {
+    let mut checker = InvariantChecker::default();
+    let lid = log_id(3, 1, 10);
+
+    // Leader 1 replicates X to node 2.
+    let r = checker.check_appended(vec![appended(1, lid, "X"), appended(2, lid, "X")], |_, _| None);
+    assert_no_violations!(r.violations);
+
+    // Leader 1 lost X with the power and reissues its log id for Y, while
+    // node 2 still holds X.
+    let held = |node: NodeId, _: &LogId| (node == 2).then(|| b"X".to_vec());
+    let r = checker.check_appended(vec![appended(1, lid, "Y")], held);
+    assert_variant!(r.violations, InvariantViolation::LogIdReused {
+        holder: 2,
+        appender: 1,
+        ..
+    });
+}
+
+#[test]
+fn log_id_reissue_allowed_once_first_entry_is_gone() {
+    let mut checker = InvariantChecker::default();
+    let lid = log_id(3, 1, 10);
+
+    let r = checker.check_appended(vec![appended(1, lid, "X")], |_, _| None);
+    assert_no_violations!(r.violations);
+
+    // X never left the leader and was lost with the power: no node holds it.
+    let r = checker.check_appended(vec![appended(1, lid, "Y"), appended(2, lid, "Y")], |_, _| None);
+    assert_no_violations!(r.violations);
+
+    // The same entry under the same log id is no reuse.
+    let held = |_: NodeId, _: &LogId| Some(b"Y".to_vec());
+    let r = checker.check_appended(vec![appended(3, lid, "Y")], held);
+    assert_no_violations!(r.violations);
+}
+
+#[test]
+fn final_log_id_check_flags_two_entries_under_one_log_id() {
+    let lid = log_id(3, 1, 10);
+    let logs = std::collections::BTreeMap::from([
+        (1, vec![(log_id(3, 1, 9), b"W".to_vec()), (lid, b"Y".to_vec())]),
+        (2, vec![(log_id(3, 1, 9), b"W".to_vec()), (lid, b"X".to_vec())]),
+        (3, vec![(lid, b"Y".to_vec())]),
+    ]);
+    let mut violations = Vec::new();
+    super::log_id_unique::check_final(&logs, &mut violations);
+    assert_eq!(violations.len(), 1, "one report per log id: {violations:?}");
+    assert_variant!(violations, InvariantViolation::LogIdReused {
+        holder: 1,
+        appender: 2,
+        ..
+    });
+}

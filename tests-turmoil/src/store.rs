@@ -66,6 +66,20 @@ pub struct StateMachineData {
     pub data: BTreeMap<String, ValueMeta>,
 }
 
+/// An entry a log store accepted, recorded for the log-id uniqueness check.
+#[derive(Debug, Clone)]
+pub struct AppendedEntry {
+    pub node: NodeId,
+    pub log_id: LogId,
+    /// The serialized payload: two entries are the same if these bytes are.
+    pub payload: Vec<u8>,
+}
+
+/// Serialize an entry's payload for comparison across nodes.
+pub fn payload_bytes(entry: &Entry) -> Vec<u8> {
+    serde_json::to_vec(&entry.payload).expect("entry payload serializes")
+}
+
 /// Everything a log store holds, as one copy: what a reader sees, or what is
 /// on disk.
 #[derive(Debug, Clone, Default)]
@@ -164,18 +178,22 @@ struct LogStoreInner {
     epoch: u64,
     /// Whether a flush task is running for the current epoch.
     flushing: bool,
+    /// Entries appended since the harness last collected them.
+    appended: Vec<AppendedEntry>,
     rng: StdRng,
 }
 
 /// In-memory log store.
 pub struct LogStore {
+    node_id: NodeId,
     model: StorageModel,
     inner: Mutex<LogStoreInner>,
 }
 
 impl LogStore {
-    pub fn new(model: StorageModel, seed: u64) -> Self {
+    pub fn new(node_id: NodeId, model: StorageModel, seed: u64) -> Self {
         Self {
+            node_id,
             model,
             inner: Mutex::new(LogStoreInner {
                 live: LogDisk::default(),
@@ -183,6 +201,7 @@ impl LogStore {
                 unflushed: VecDeque::new(),
                 epoch: 0,
                 flushing: false,
+                appended: Vec::new(),
                 rng: StdRng::seed_from_u64(seed),
             }),
         }
@@ -191,6 +210,24 @@ impl LogStore {
     /// The log ids a reader sees.
     pub fn log_id_list(&self) -> LogIdListOf<TypeConfig> {
         self.inner.lock().unwrap().live.log_id_list()
+    }
+
+    /// Take the entries appended since the last call.
+    pub fn take_appended(&self) -> Vec<AppendedEntry> {
+        std::mem::take(&mut self.inner.lock().unwrap().appended)
+    }
+
+    /// The payload of the entry a reader sees at `log_id`, if this store
+    /// holds exactly that log id.
+    pub fn payload_at(&self, log_id: &LogId) -> Option<Vec<u8>> {
+        let inner = self.inner.lock().unwrap();
+        inner.live.log.get(&log_id.index).filter(|e| e.log_id == *log_id).map(payload_bytes)
+    }
+
+    /// Every entry a reader sees, as `(log id, payload)`.
+    pub fn entries(&self) -> Vec<(LogId, Vec<u8>)> {
+        let inner = self.inner.lock().unwrap();
+        inner.live.log.values().map(|e| (e.log_id, payload_bytes(e))).collect()
     }
 
     /// The process holding this store crashed. Its flush task is gone and
@@ -217,6 +254,18 @@ impl LogStore {
     /// `waiter` hears so here.
     fn submit(self: &Arc<Self>, write: LogWrite, waiter: FlushWaiter) {
         let mut inner = self.inner.lock().unwrap();
+        if let LogWrite::Append(entries) = &write {
+            let node = self.node_id;
+            let appended: Vec<_> = entries
+                .iter()
+                .map(|e| AppendedEntry {
+                    node,
+                    log_id: e.log_id,
+                    payload: payload_bytes(e),
+                })
+                .collect();
+            inner.appended.extend(appended);
+        }
 
         if !self.model.async_flush {
             inner.live.apply(&write);
@@ -513,9 +562,9 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachine> {
 ///
 /// The log store draws its flush latencies from `seed`, the state machine its
 /// apply delays from `seed + 1`.
-pub fn new_store(model: &StorageModel, seed: u64) -> (Arc<LogStore>, Arc<StateMachine>) {
+pub fn new_store(node_id: NodeId, model: &StorageModel, seed: u64) -> (Arc<LogStore>, Arc<StateMachine>) {
     (
-        Arc::new(LogStore::new(model.clone(), seed)),
+        Arc::new(LogStore::new(node_id, model.clone(), seed)),
         Arc::new(StateMachine::new(model, seed.wrapping_add(1))),
     )
 }
@@ -566,7 +615,7 @@ mod tests {
 
     #[tokio::test]
     async fn power_loss_drops_unflushed_appends() {
-        let mut store = Arc::new(LogStore::new(async_flush(1_000), 0));
+        let mut store = Arc::new(LogStore::new(1, async_flush(1_000), 0));
         let (tx, mut rx) = TypeConfig::oneshot();
         store.append([blank(1), blank(2)], IOFlushed::signal(tx)).await.unwrap();
 
@@ -580,7 +629,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_crash_keeps_unflushed_appends() {
-        let mut store = Arc::new(LogStore::new(async_flush(1_000), 0));
+        let mut store = Arc::new(LogStore::new(1, async_flush(1_000), 0));
         store.append([blank(1), blank(2)], IOFlushed::noop()).await.unwrap();
 
         store.crash(false);
@@ -589,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn saved_vote_is_durable_with_every_write_before_it() {
-        let mut store = Arc::new(LogStore::new(async_flush(2), 0));
+        let mut store = Arc::new(LogStore::new(1, async_flush(2), 0));
         store.append([blank(1), blank(2), blank(3)], IOFlushed::noop()).await.unwrap();
         store.truncate_after(Some(log_id(1))).await.unwrap();
         let vote = Vote::new_committed(2, 1);
@@ -602,7 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn lazy_writes_are_lost_with_unflushed_appends() {
-        let mut store = Arc::new(LogStore::new(async_flush(2), 0));
+        let mut store = Arc::new(LogStore::new(1, async_flush(2), 0));
         let (tx, rx) = TypeConfig::oneshot();
         store.append([blank(1), blank(2), blank(3)], IOFlushed::signal(tx)).await.unwrap();
         rx.await.unwrap().unwrap();
@@ -627,7 +676,7 @@ mod tests {
             durable_append: true,
             ..async_flush(5)
         };
-        let mut store = Arc::new(LogStore::new(model, 0));
+        let mut store = Arc::new(LogStore::new(1, model, 0));
         store.append([blank(1)], IOFlushed::noop()).await.unwrap();
 
         let (tx, mut rx) = TypeConfig::oneshot();
@@ -651,7 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_model_writes_through() {
-        let mut store = Arc::new(LogStore::new(StorageModel::durable(), 0));
+        let mut store = Arc::new(LogStore::new(1, StorageModel::durable(), 0));
         let (tx, mut rx) = TypeConfig::oneshot();
         store.append([blank(1)], IOFlushed::signal(tx)).await.unwrap();
         assert!(rx.try_recv().is_ok(), "reported flushed before append returns");

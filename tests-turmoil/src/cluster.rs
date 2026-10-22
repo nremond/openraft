@@ -11,6 +11,7 @@ use turmoil::net::TcpListener;
 use crate::network::TurmoilNetwork;
 use crate::network::handle_rpc;
 use crate::storage_model::StorageModel;
+use crate::store::AppendedEntry;
 use crate::store::LogStore;
 use crate::store::StateMachine;
 use crate::store::StateMachineData;
@@ -86,6 +87,21 @@ impl ClusterState {
         self.log_stores.iter().map(|(&id, log_store)| (id, log_store.log_id_list())).collect()
     }
 
+    /// Take the entries every log store appended since the last call.
+    pub fn take_appended(&self) -> Vec<AppendedEntry> {
+        self.log_stores.values().flat_map(|log_store| log_store.take_appended()).collect()
+    }
+
+    /// The payload a node's log store holds under `log_id`, if any.
+    pub fn payload_at(&self, node_id: NodeId, log_id: &LogId) -> Option<Vec<u8>> {
+        self.log_stores.get(&node_id)?.payload_at(log_id)
+    }
+
+    /// Every node's log entries as `(log id, payload)`, crashed nodes included.
+    pub fn all_entries(&self) -> BTreeMap<NodeId, Vec<(LogId, Vec<u8>)>> {
+        self.log_stores.iter().map(|(&id, log_store)| (id, log_store.entries())).collect()
+    }
+
     /// Find a Raft node that is currently the leader.
     pub fn find_leader(&self) -> Option<Arc<Raft>> {
         self.rafts.values().find(|raft| raft.metrics().borrow_watched().state.is_leader()).cloned()
@@ -146,7 +162,7 @@ pub fn register_node_storage(
 ) {
     let mut state = cluster_state.lock().unwrap();
     if let std::collections::btree_map::Entry::Vacant(e) = state.log_stores.entry(node_id) {
-        let (log_store, state_machine) = new_store(model, seed);
+        let (log_store, state_machine) = new_store(node_id, model, seed);
         e.insert(log_store);
         state.state_machines.insert(node_id, state_machine);
     }

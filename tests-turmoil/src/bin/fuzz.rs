@@ -29,6 +29,7 @@ use tests_turmoil::cluster::host_name;
 use tests_turmoil::cluster::register_node_storage;
 use tests_turmoil::cluster::spawn_host;
 use tests_turmoil::invariants::InvariantChecker;
+use tests_turmoil::invariants::log_id_unique;
 use tests_turmoil::liveness;
 use tests_turmoil::oracle::ClientHistory;
 use tests_turmoil::storage_model::StorageModel;
@@ -1329,14 +1330,24 @@ impl IterationState {
         }
         self.steps += 1;
 
-        let (snapshots, durable_logs) = {
+        let (snapshots, durable_logs, appended) = {
             let state = cluster_state.lock().unwrap();
-            (state.get_all_full_snapshots(), state.get_all_durable_log_ids())
+            (
+                state.get_all_full_snapshots(),
+                state.get_all_durable_log_ids(),
+                state.take_appended(),
+            )
         };
         self.invariant_checks += 1;
         let result = self.invariants.check_with_durable_logs(&snapshots, &durable_logs);
         for v in result.violations {
             self.record_violation(format!("Step {}: {v:?}", self.steps));
+        }
+        let result = self.invariants.check_appended(appended, |node, log_id| {
+            cluster_state.lock().unwrap().payload_at(node, log_id)
+        });
+        for v in result.violations {
+            self.record_violation(format!("Step {}: {v}", self.steps));
         }
         for v in history.lock().unwrap().drain_violations() {
             self.record_violation(format!("Step {}: {v}", self.steps));
@@ -1582,6 +1593,16 @@ fn run_liveness_phase(
         for v in leaked {
             st.record_violation(format!("Step {}: {v}", st.steps));
         }
+    }
+
+    // Replicas agree: no two logs hold different entries under one log id.
+    let mut reused = Vec::new();
+    log_id_unique::check_final(&cluster_state.lock().unwrap().all_entries(), &mut reused);
+    if reused.is_empty() {
+        println!("LIVENESS: log id uniqueness check passed on every node");
+    }
+    for v in reused {
+        st.record_violation(format!("Step {}: {v}", st.steps));
     }
 }
 
