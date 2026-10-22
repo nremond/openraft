@@ -35,12 +35,17 @@ pub struct ClusterState {
     pub log_stores: BTreeMap<NodeId, Arc<LogStore>>,
     /// State machines for each node.
     pub state_machines: BTreeMap<NodeId, Arc<StateMachine>>,
+    /// How many times each node's Raft instance has started.
+    pub incarnations: BTreeMap<NodeId, u64>,
 }
 
 /// Combined snapshot of both Raft and State Machine state.
 pub struct FullNodeSnapshot {
     pub raft: RaftMetrics,
     pub sm: StateMachineData,
+    /// Which start of the node's process this snapshot comes from: it
+    /// changes at every restart, which may legitimately lose unflushed state.
+    pub incarnation: u64,
 }
 
 impl ClusterState {
@@ -49,6 +54,7 @@ impl ClusterState {
             rafts: BTreeMap::new(),
             log_stores: BTreeMap::new(),
             state_machines: BTreeMap::new(),
+            incarnations: BTreeMap::new(),
         }
     }
 
@@ -70,7 +76,8 @@ impl ClusterState {
             .map(|(&id, raft)| {
                 let sm = self.state_machines.get(&id).expect("sm not found").get_data();
                 let raft = raft.metrics().borrow_watched().clone();
-                (id, FullNodeSnapshot { raft, sm })
+                let incarnation = self.incarnations.get(&id).copied().unwrap_or_default();
+                (id, FullNodeSnapshot { raft, sm, incarnation })
             })
             .collect()
     }
@@ -113,6 +120,7 @@ impl ClusterState {
     /// Register a freshly started Raft instance as live.
     pub fn register_raft(&mut self, node_id: NodeId, raft: Arc<Raft>) {
         self.rafts.insert(node_id, raft);
+        *self.incarnations.entry(node_id).or_default() += 1;
     }
 
     /// Drop the live handle for a crashed node.

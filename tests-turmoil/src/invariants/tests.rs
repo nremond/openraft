@@ -52,6 +52,7 @@ struct SnapshotBuilder {
     membership: Vec<Vec<NodeId>>,
     sm_last_applied: Option<LogId>,
     sm_data: std::collections::BTreeMap<String, crate::store::ValueMeta>,
+    incarnation: u64,
 }
 
 impl SnapshotBuilder {
@@ -72,7 +73,14 @@ impl SnapshotBuilder {
             membership: Vec::new(),
             sm_last_applied: None,
             sm_data: std::collections::BTreeMap::new(),
+            incarnation: 1,
         }
+    }
+
+    /// Which start of the node's process the snapshot comes from.
+    fn incarnation(mut self, n: u64) -> Self {
+        self.incarnation = n;
+        self
     }
 
     fn term(mut self, t: u64) -> Self {
@@ -179,7 +187,11 @@ impl SnapshotBuilder {
             data: self.sm_data,
         };
 
-        (self.node_id, FullNodeSnapshot { raft, sm })
+        (self.node_id, FullNodeSnapshot {
+            raft,
+            sm,
+            incarnation: self.incarnation,
+        })
     }
 }
 
@@ -746,4 +758,85 @@ fn monotonic_vote_regression() {
     let tick2 = vec![SnapshotBuilder::new(1).term(5).leader(5, 2, false).build()];
     let r = checker.check(&tick2);
     assert_variant!(r.violations, InvariantViolation::VoteRegressed { .. });
+}
+
+#[test]
+fn term_and_commit_may_regress_across_restart() {
+    let mut checker = InvariantChecker::default();
+
+    let tick1 = vec![
+        SnapshotBuilder::new(1)
+            .term(5)
+            .log_entries([log_id(1, 1, 1), log_id(1, 1, 5)])
+            .committed(log_id(1, 1, 5))
+            .build(),
+    ];
+    assert_no_violations!(checker.check(&tick1).violations);
+
+    // A power loss dropped an unflushed vote and `save_committed`: the next
+    // process starts from what was on disk.
+    let tick2 = vec![
+        SnapshotBuilder::new(1)
+            .incarnation(2)
+            .term(3)
+            .log_entries([log_id(1, 1, 1), log_id(1, 1, 5)])
+            .committed(log_id(1, 1, 3))
+            .build(),
+    ];
+    assert_no_violations!(checker.check(&tick2).violations);
+
+    // Within that process they must not go back again.
+    let tick3 = vec![
+        SnapshotBuilder::new(1)
+            .incarnation(2)
+            .term(3)
+            .log_entries([log_id(1, 1, 1), log_id(1, 1, 5)])
+            .committed(log_id(1, 1, 2))
+            .build(),
+    ];
+    let r = checker.check(&tick3);
+    assert_variant!(r.violations, InvariantViolation::CommitIndexRegressed {
+        previous: 3,
+        current: 2,
+        ..
+    });
+}
+
+#[test]
+fn restarting_node_skipped_until_it_reports_its_state() {
+    let mut checker = InvariantChecker::default();
+
+    let tick1 = vec![SnapshotBuilder::new(1).term(5).leader(5, 2, true).applied(log_id(5, 2, 7)).build()];
+    assert_no_violations!(checker.check(&tick1).violations);
+
+    // Restarted, its core still waits for a flush in its startup IO: the
+    // metrics are the initial ones.
+    let mut starting = SnapshotBuilder::new(1).incarnation(2).build();
+    starting.1.raft = RaftMetrics::<TypeConfig>::new_initial(1);
+    let tick2 = vec![starting];
+    assert_no_violations!(checker.check(&tick2).violations);
+
+    // Then it reports what it loaded.
+    let tick3 =
+        vec![SnapshotBuilder::new(1).incarnation(2).term(5).leader(5, 2, true).applied(log_id(5, 2, 7)).build()];
+    assert_no_violations!(checker.check(&tick3).violations);
+}
+
+#[test]
+fn vote_and_applied_checked_across_restart() {
+    let mut checker = InvariantChecker::default();
+
+    let tick1 = vec![SnapshotBuilder::new(1).term(5).leader(5, 2, true).applied(log_id(5, 2, 7)).build()];
+    assert_no_violations!(checker.check(&tick1).violations);
+
+    // The flushed vote and the state machine are durable: a restart keeps them.
+    let tick2 =
+        vec![SnapshotBuilder::new(1).incarnation(2).term(5).leader(4, 2, true).applied(log_id(4, 2, 4)).build()];
+    let r = checker.check(&tick2);
+    assert_variant!(r.violations, InvariantViolation::VoteRegressed { .. });
+    assert_variant!(r.violations, InvariantViolation::AppliedIndexRegressed {
+        previous: 7,
+        current: 4,
+        ..
+    });
 }

@@ -303,7 +303,7 @@ struct FuzzConfig {
 
     /// Storage faults: drawn from each seed, none (as before they
     /// existed), or always lossy
-    #[arg(long, value_enum, default_value = "durable")]
+    #[arg(long, value_enum, default_value = "seeded")]
     storage: StorageMode,
 }
 
@@ -1374,10 +1374,11 @@ fn dump_cluster_state(cluster_state: &Arc<Mutex<ClusterState>>) {
     println!("--- cluster state dump ---");
     for (id, s) in &snapshots {
         println!(
-            "  n{id}: state={:?} vote={} last_log={:?} applied={:?} snapshot={:?} purged={:?} membership={}",
+            "  n{id}: state={:?} vote={} last_log={:?} committed={:?} applied={:?} snapshot={:?} purged={:?} membership={}",
             s.raft.state,
             s.raft.vote,
             s.raft.last_log_index,
+            s.raft.local_committed,
             s.raft.last_applied,
             s.raft.snapshot,
             s.raft.purged,

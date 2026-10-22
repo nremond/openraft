@@ -54,7 +54,7 @@ The fuzzer draws these switches from each seed, on an RNG stream of its own, so 
 
 A flush, its late report included, stays within a quarter of `heartbeat_interval`, stalls aside. A follower acks an append once it has flushed it, and openraft gives the whole round trip 3/4 of `heartbeat_interval`: with flushes near that deadline every append times out and replication stops for good, which says more about the configuration than about openraft.
 
-CI and `make detsim` pass `--storage durable`, so they run as before. With storage faults the fuzzer still fails on `main`, through the two purge bugs that [#2177](https://github.com/databendlabs/openraft/pull/2177) fixes, so `seeded` and `lossy` are for runs by hand until it lands; then CI can drop `--storage durable`. Until the invariant checks allow for a restart that reloads less than the process had, `durable` is also the default.
+CI and `make detsim` pass `--storage durable`, so they run as before. With storage faults the fuzzer still fails on `main`, through the two purge bugs that [#2177](https://github.com/databendlabs/openraft/pull/2177) fixes, so `seeded` and `lossy` are for runs by hand until it lands; then CI can drop `--storage durable`.
 
 ## Invariants Checked
 
@@ -69,15 +69,17 @@ The checker lives in `src/invariants/`, with one file per property. Each propert
 | Committed On Quorum     | —        | `CommittedEntriesReachMajority` | A leader's own just-committed index is present on a voter quorum                     |
 | Committed Immutable     | derived  | (history-based)                 | Once an index is reported committed, its leader id never changes across ticks        |
 | State Ordering          | —        | (implementation sanity)         | `purged ≤ snapshot ≤ applied ≤ committed ≤ last_log` on every node                   |
-| Monotonic Term          | §3.3     | `MonotonicTerm`                 | A node's `current_term` never decreases across ticks                                 |
-| Monotonic Commit Index  | §3.4     | `MonotonicCommitIndex`          | A node's `committed.index` never decreases across ticks                              |
-| Monotonic Applied Index | derived  | —                               | A node's `last_applied.index` never decreases across ticks                           |
-| Monotonic Vote          | §3.3     | `MonotonicVote`                 | A node's persisted vote (ordered by `(term, leader_id, committed)`) never regresses  |
+| Monotonic Term          | §3.3     | `MonotonicTerm`                 | A node's `current_term` never decreases within one process                           |
+| Monotonic Commit Index  | §3.4     | `MonotonicCommitIndex`          | A node's `committed.index` never decreases within one process                        |
+| Monotonic Applied Index | derived  | —                               | A node's `last_applied.index` never decreases, restarts included                     |
+| Monotonic Vote          | §3.3     | `MonotonicVote`                 | A node's flushed vote (ordered by `(term, leader_id, committed)`) never regresses, restarts included |
 | Monotonic SM Keys       | derived  | —                               | Per node and key, the writing log id never decreases and keys never vanish          |
 
 All identity comparisons use `CommittedLeaderId` (not just `term`), so the same checks are correct under both openraft modes:
 - `leader_id_std`: `CommittedLeaderId == term`, so Election Safety reduces to "one leader per term".
 - `leader_id_adv` (the default, used here): `CommittedLeaderId == (term, node_id)`, so two nodes legitimately leading with different `node_id`s in the same term are not flagged.
+
+A restart reloads term and committed from disk, which may hold less than the process had: a power loss drops a vote whose `save_vote` had not returned, and an unflushed `save_committed`. So those two are checked within one process; the flushed vote, which storage made durable before openraft reported it, and the applied state, durable when `apply` returns, are checked across restarts too.
 
 The checker is **stateful**: `InvariantChecker` retains per-index committed history (for Committed Immutable) and per-node last-seen state (for the Monotonic family) across ticks, so cross-time invariants can be caught. `Leader Append-Only` (paper §3.6.3) is not checked directly; its safety content for committed entries is already covered by Log Matching + Committed Immutable + Leader Completeness.
 
@@ -149,7 +151,7 @@ cargo run --release --bin fuzz -- --seed 500 --iterations 20 --max-steps 50000
 | `--iterations` | 100 (0=∞)      | Number of iterations; stops at the first failure                   |
 | `--max-steps`  | 100000         | Safety-phase length in ticks; liveness phases run after            |
 | `--crash-file` | —              | Where to write crash info                                          |
-| `--storage`    | `durable`      | Storage faults: drawn from each seed (`seeded`), none (`durable`, as before they existed, and what CI runs), or always lossy (`lossy`) |
+| `--storage`    | `seeded`       | Storage faults: drawn from each seed (`seeded`), none (`durable`, as before they existed, and what CI runs), or always lossy (`lossy`) |
 
 Environment variables:
 

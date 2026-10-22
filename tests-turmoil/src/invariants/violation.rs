@@ -77,11 +77,11 @@ pub enum InvariantViolation {
     },
 
     /// Monotonic Term (Vanlightly `MonotonicTerm`):
-    /// `current_term` must never decrease on a node across ticks.
+    /// `current_term` must never decrease on a node across ticks of one process.
     TermRegressed { node: NodeId, previous: u64, current: u64 },
 
     /// Monotonic Commit Index (Vanlightly `MonotonicCommitIndex`):
-    /// the `committed` index must never decrease on a node across ticks.
+    /// the `committed` index must never decrease on a node across ticks of one process.
     CommitIndexRegressed { node: NodeId, previous: u64, current: u64 },
 
     /// Monotonic Applied Index (derived — applied is implied monotonic in Raft):
