@@ -78,15 +78,13 @@
     :parse-fn parse-long]
 
    [nil "--snapshot-threshold COUNT"
-    "Committed logs between snapshots."
-    :default openraft-db/default-snapshot-threshold
+    "Committed logs between snapshots; by default chosen from the seed."
     :parse-fn parse-long
     :validate [#(and (some? %) (pos? %))
                "Must be a positive integer."]]
 
    [nil "--snapshot-logs-to-keep COUNT"
-    "Logs kept behind the latest snapshot; a follower needing purged logs installs a snapshot."
-    :default openraft-db/default-snapshot-logs-to-keep
+    "Logs kept behind the latest snapshot; by default chosen from the seed."
     :parse-fn parse-long
     :validate [#(and (some? %) (not (neg? %)))
                "Must be a non-negative integer."]]
@@ -148,9 +146,16 @@
         seed (or (:seed options)
                  (random/long Long/MAX_VALUE))]
     (random/set-seed! seed)
-    (cond-> (update parsed :options assoc
-                    :seed seed
-                    :removed-leader-step-down (if (even? seed) :default :never))
+    (cond-> (update parsed :options
+                    (fn [options]
+                      (let [snapshot (openraft-db/snapshot-settings-for seed)]
+                        (assoc options
+                               :seed seed
+                               :removed-leader-step-down (if (even? seed) :default :never)
+                               :snapshot-threshold (or (:snapshot-threshold options)
+                                                       (:snapshot-threshold snapshot))
+                               :snapshot-logs-to-keep (or (:snapshot-logs-to-keep options)
+                                                          (:snapshot-logs-to-keep snapshot))))))
       (seq liveness-errors)
       (update :errors (fnil into []) liveness-errors)
 

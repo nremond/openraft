@@ -65,10 +65,9 @@
     (is (empty? (:errors (tools-cli/parse-opts [] cli/cli-opts))))))
 
 (deftest validates-the-snapshot-threshold
-  (testing "the default applies snapshot pressure"
-    (is (= openraft-db/default-snapshot-threshold
-           (get-in (tools-cli/parse-opts [] cli/cli-opts)
-                   [:options :snapshot-threshold]))))
+  (testing "unset unless given, so that the seed chooses it"
+    (is (nil? (get-in (tools-cli/parse-opts [] cli/cli-opts)
+                      [:options :snapshot-threshold]))))
 
   (testing "malformed and zero thresholds are rejected"
     (doseq [value ["abc" "0"]]
@@ -89,11 +88,37 @@
         (is (= policy (:removed-leader-step-down
                        (cli/openraft-test (:options first-run)))))))))
 
+(deftest selects-snapshot-settings-from-the-seed
+  (testing "seeds 0 to 3 run both settings with both step-down policies"
+    (doseq [[seed policy threshold keep] [[0 :default 100 1000]
+                                          [1 :never 100 1000]
+                                          [2 :default 50 20]
+                                          [3 :never 50 20]
+                                          [-1 :never 50 20]]]
+      (let [opts {:nemesis :partition :time-limit 10 :seed seed}
+            options (:options (#'cli/prepare-options {:options opts}))]
+        (is (= [policy threshold keep]
+               ((juxt :removed-leader-step-down :snapshot-threshold :snapshot-logs-to-keep)
+                options))
+            (str "seed " seed))
+        (is (= [threshold keep]
+               ((juxt :snapshot-threshold :snapshot-logs-to-keep)
+                (cli/openraft-test options)))
+            (str "seed " seed)))))
+
+  (testing "an explicit setting overrides the seed's, the other still follows it"
+    (let [prepare #(:options (#'cli/prepare-options {:options (merge {:nemesis :partition
+                                                                      :time-limit 10}
+                                                                     %)}))]
+      (is (= [250 20] ((juxt :snapshot-threshold :snapshot-logs-to-keep)
+                       (prepare {:seed 2 :snapshot-threshold 250}))))
+      (is (= [100 0] ((juxt :snapshot-threshold :snapshot-logs-to-keep)
+                      (prepare {:seed 0 :snapshot-logs-to-keep 0})))))))
+
 (deftest validates-the-snapshot-logs-to-keep
-  (testing "the default is passed to every node"
-    (is (= openraft-db/default-snapshot-logs-to-keep
-           (get-in (tools-cli/parse-opts [] cli/cli-opts)
-                   [:options :snapshot-logs-to-keep]))))
+  (testing "unset unless given, so that the seed chooses it"
+    (is (nil? (get-in (tools-cli/parse-opts [] cli/cli-opts)
+                      [:options :snapshot-logs-to-keep]))))
 
   (testing "zero purges every log a snapshot covers"
     (let [parsed (tools-cli/parse-opts ["--snapshot-logs-to-keep" "0"] cli/cli-opts)]
@@ -393,14 +418,16 @@
 (deftest selects-two-nodes-for-leader-removal
   (doseq [nodes [["n1" "n2"] ["n1" "n2" "n3" "n4" "n5"]]]
     (let [parsed (tools-cli/parse-opts ["--liveness=leader-removal-recovery"] cli/cli-opts)
-          options (assoc (:options parsed) :nodes nodes)]
-      (is (empty? (:errors (#'cli/prepare-options {:options options}))))
+          prepared (#'cli/prepare-options {:options (assoc (:options parsed) :nodes nodes)})
+          options (:options prepared)]
+      (is (empty? (:errors prepared)))
       (with-redefs [openraft-nemesis/compose-packages
                     (fn [& _] (throw (AssertionError. "Safety nemesis selected")))]
         (let [test (cli/openraft-test options)]
           (is (= ["n1" "n2"] (:nodes test)))
           (is (nil? (:two-leaf-partition test)))
-          (is (= openraft-db/default-snapshot-threshold (:snapshot-threshold test)))))))
+          (is (= (openraft-db/snapshot-settings-for (:seed options))
+                 (select-keys test [:snapshot-threshold :snapshot-logs-to-keep])))))))
   (doseq [nodes [["n1"] ["n1" "n1"]]]
     (is (seq (:errors (#'cli/prepare-options
                        {:options {:liveness :leader-removal-recovery :nodes nodes}}))))))

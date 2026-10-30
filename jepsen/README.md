@@ -269,7 +269,8 @@ The selected policy is stored in the test configuration and logged at every node
 start, including restarts. `Never` is passed to the test app with
 `--disable-removed-leader-step-down`; without that flag the app keeps OpenRaft's
 default. Either policy still allows a leader to step down on a higher term.
-Use `SEED=0` and `SEED=1` to exercise both policies in membership runs.
+Use `SEED=0` and `SEED=1` to exercise both policies in membership runs; bit 1
+of the seed chooses the snapshot settings (see below).
 
 The generator starts with shrink and grow, then attempts shrink-twice on clusters
 of at least five nodes, before randomly mixing the applicable operations. On
@@ -390,18 +391,27 @@ would look successful. `results.edn` reports how many classes installed a
 recognized fault under `:fault-classes-executed`, and zero rejects the run.
 Cleanup, clock reset and recovery operations do not count toward it.
 
-Every Jepsen node builds a snapshot after 50 newly committed logs by default
-and keeps 20 logs behind it. The regular write workload therefore exercises
-snapshot construction without a snapshot-specific Nemesis. A follower that
-misses more than 20 logs during a partition, process kill, or pause may need
-logs the leader has already purged; it then installs the leader's snapshot.
-This typically happens past about 70 logs, roughly ten seconds of writes.
-Snapshot construction and purging are asynchronous, so the actual cutoff
-varies. A follower whose missing logs remain available can catch up from
-the log. Not every run installs a snapshot, and a run without one does not
-fail. Each install logs
-`Done install complete snapshot` in that node's `openraft.log`. Set
-`SNAPSHOT_THRESHOLD` or `SNAPSHOT_LOGS_TO_KEEP` to override either for a run.
+Each run chooses its snapshot settings from bit 1 of its seed:
+
+| `SEED & 2` | Snapshot after | Logs kept behind it |
+|---|---|---|
+| 0 | 100 committed logs | 1000 |
+| nonzero | 50 committed logs | 20 |
+
+Every node therefore builds snapshots during the regular write workload,
+without a snapshot-specific Nemesis. With 1000 logs kept, a follower that falls
+behind during a partition, process kill, or pause catches up from the log. With
+20, one that misses more than 20 logs may need logs the leader has already
+purged; it then installs the leader's snapshot. This typically happens past
+about 70 logs, roughly ten seconds of writes. Snapshot construction and purging
+are asynchronous, so the actual cutoff varies. A follower whose missing logs
+remain available can catch up from the log. Either path may happen in a run,
+and a run without a snapshot installation does not fail. Each install logs
+`Done install complete snapshot` in that node's `openraft.log`, and every node
+start logs the settings. Bit 0 of the seed chooses the removed-leader step-down
+policy, so `SEED=0` to `SEED=3` run both settings with both policies. Set
+`SNAPSHOT_THRESHOLD` or `SNAPSHOT_LOGS_TO_KEEP` to override either for a run;
+the other still follows the seed.
 
 After the fault schedule ends, Jepsen heals partitions, restarts killed
 processes, resumes paused processes, restores membership, and then performs one

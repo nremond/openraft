@@ -14,8 +14,22 @@
 (def data-dir "/var/lib/openraft")
 (def log-dir "/var/log/openraft")
 (def log-file (str log-dir "/openraft.log"))
-(def default-snapshot-threshold 50)
-(def default-snapshot-logs-to-keep 20)
+
+(def snapshot-settings
+  "The two snapshot settings a run chooses between by its seed. With 1000 logs
+  kept behind each snapshot, a follower that falls behind during a fault
+  catches up from the log; with 20, it usually installs the leader's snapshot."
+  {:keep-many {:snapshot-threshold 100 :snapshot-logs-to-keep 1000}
+   :keep-few {:snapshot-threshold 50 :snapshot-logs-to-keep 20}})
+
+(defn snapshot-settings-for
+  "The snapshot settings for `seed`, chosen by its bit 1. Bit 0 chooses the
+  removed-leader step-down policy, so seeds 0 to 3 run both settings with both
+  policies."
+  [seed]
+  (if (zero? (bit-and seed 2))
+    (:keep-many snapshot-settings)
+    (:keep-few snapshot-settings)))
 
 (def ^:private process-confirm-timeout-ms 30000)
 (def ^:private process-confirm-interval-ms 100)
@@ -241,7 +255,9 @@
         (info node "starting OpenRaft" {:id node-id
                                         :api-addr api-addr
                                         :raft-addr raft-addr
-                                        :removed-leader-step-down (:removed-leader-step-down test)})
+                                        :removed-leader-step-down (:removed-leader-step-down test)
+                                        :snapshot-threshold (:snapshot-threshold test)
+                                        :snapshot-logs-to-keep (:snapshot-logs-to-keep test)})
         (c/su
          (start-process! node-id
                          api-addr
